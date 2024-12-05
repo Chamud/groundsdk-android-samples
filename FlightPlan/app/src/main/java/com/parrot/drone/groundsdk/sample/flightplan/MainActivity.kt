@@ -1,35 +1,3 @@
-/*
- *     Copyright (C) 2019 Parrot Drones SAS
- *
- *     Redistribution and use in source and binary forms, with or without
- *     modification, are permitted provided that the following conditions
- *     are met:
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of the Parrot Company nor the names
- *       of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written
- *       permission.
- *
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *     "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *     LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- *     FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- *     PARROT COMPANY BE LIABLE FOR ANY DIRECT, INDIRECT,
- *     INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *     BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- *     OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
- *     AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- *     OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
- *     OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- *     SUCH DAMAGE.
- *
- */
-
 package com.parrot.drone.groundsdk.sample.flightplan
 
 import android.os.Bundle
@@ -46,14 +14,57 @@ import com.parrot.drone.groundsdk.device.pilotingitf.Activable
 import com.parrot.drone.groundsdk.device.pilotingitf.FlightPlanPilotingItf
 import com.parrot.drone.groundsdk.facility.AutoConnection
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import android.content.Context
+import android.util.Log
+import java.text.SimpleDateFormat
+import java.util.*
 
-/**
- * GroundSdk Hello Drone Sample.
- *
- * This activity allows the application to connect to a drone and/or a remote control.
- * It displays the connection state, battery level and video stream.
- * It allows to take off and land by button click.
- */
+class Logger(private val context: Context) {
+
+    private val logFile: File
+    private val logFileName = "app_logs.txt"
+
+    init {
+        // Define the log file location
+        logFile = File(context.getExternalFilesDir(null), logFileName)
+        // Ensure the file exists
+        if (!logFile.exists()) {
+            logFile.createNewFile()
+        }
+    }
+
+    // Write log message to file
+    fun log(message: String) {
+        val timestamp = getCurrentTimestamp()
+        val logMessage = "$timestamp: $message\n"
+        try {
+            FileOutputStream(logFile, true).use { fos ->
+                fos.write(logMessage.toByteArray())
+            }
+            Log.d("Logger", "Log saved: $logMessage") // Optional: Log to Android log as well
+        } catch (e: IOException) {
+            Log.e("Logger", "Error writing log to file", e)
+        }
+    }
+
+    // Retrieve current timestamp
+    private fun getCurrentTimestamp(): String {
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        return sdf.format(Date())
+    }
+
+    // Optional: Read all logs from the file
+    fun readLogs(): String {
+        return try {
+            logFile.readText()
+        } catch (e: IOException) {
+            "Error reading log file"
+        }
+    }
+}
+
 class MainActivity : AppCompatActivity() {
 
     /** GroundSdk instance. */
@@ -78,7 +89,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var droneStateTxt: TextView
     /** RC state text view. */
     private lateinit var rcStateTxt: TextView
-    /** Flight Plan latest uplaod state text view. */
+    /** Flight Plan latest upload state text view. */
     private lateinit var uploadStateTxt: TextView
     /** Flight Plan unavailability reasons list. */
     private lateinit var unavailabilityReasonsTxt: TextView
@@ -86,6 +97,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var uploadBtn: Button
     /** Activate Flight Plan button. */
     private lateinit var activateBtn: Button
+
+    /** Logger instance for logging actions. */
+    private lateinit var logger: Logger
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,10 +123,17 @@ class MainActivity : AppCompatActivity() {
         rcStateTxt.text = DeviceState.ConnectionState.DISCONNECTED.toString()
         uploadStateTxt.text = FlightPlanPilotingItf.UploadState.NONE.toString()
 
+        // Initialize Logger
+        logger = Logger(this)
+
+        // Log creation of MainActivity
+        logger.log("MainActivity onCreate() called.")
+
         // Get a GroundSdk session.
         groundSdk = ManagedGroundSdk.obtainSession(this)
-        // All references taken are linked to the activity lifecycle and
-        // automatically closed at its destruction.
+        logger.log("GroundSdk session obtained.")
+
+        logFlightPlanData()
 
         // Monitor the auto connection facility.
         groundSdk.getFacility(AutoConnection::class.java) { autoConnection ->
@@ -120,11 +141,17 @@ class MainActivity : AppCompatActivity() {
             autoConnection ?: return@getFacility // if it is not available, we have nothing to do
 
             // Start auto connection if necessary.
-            if (autoConnection.status != AutoConnection.Status.STARTED) autoConnection.start()
+            if (autoConnection.status != AutoConnection.Status.STARTED) {
+                logger.log("Auto connection not started, starting it now.")
+                autoConnection.start()
+            } else {
+                logger.log("Auto connection already started.")
+            }
 
             // If the drone has changed.
             if (drone?.uid != autoConnection.drone?.uid) {
                 // Stop monitoring the previous drone.
+                logger.log("Drone has changed.")
                 if (drone != null) stopDroneMonitors()
                 // Monitor the new drone.
                 drone = autoConnection.drone
@@ -134,6 +161,7 @@ class MainActivity : AppCompatActivity() {
             // If the remote control has changed.
             if (rc?.uid  != autoConnection.remoteControl?.uid) {
                 // Stop monitoring the old remote.
+                logger.log("Remote control has changed.")
                 if (rc != null) stopRcMonitors()
                 // Monitor the new remote.
                 rc = autoConnection.remoteControl
@@ -146,27 +174,46 @@ class MainActivity : AppCompatActivity() {
      * Starts drone monitors.
      */
     private fun startDroneMonitors() {
+        logger.log("Starting drone monitors.")
         // Monitor current drone state.
-        droneStateRef = drone?.getState {droneState ->
+        droneStateRef = drone?.getState { droneState ->
             // Called at each drone state update.
             droneState ?: return@getState
 
             // Update drone connection state view.
             droneStateTxt.text = droneState.connectionState.toString()
-        }
 
+            // Log the connection state change.
+            logger.log("Drone connection state changed: ${droneState.connectionState}")
+        }
 
         // Monitor piloting interface.
         pilotingItfRef = drone?.getPilotingItf(
             FlightPlanPilotingItf::class.java, ::managePilotingItfState)
     }
 
+    private fun logFlightPlanData() {
+        // Open the flightplan.mavlink file and read its content
+        val flightPlanData = runCatching {
+            assets.open("flightplan.mavlink").use { input ->
+                input.bufferedReader().use { it.readText() }
+            }
+        }.getOrNull()
+
+        // If the file was successfully read, log its content
+        flightPlanData?.let {
+            logger.log("Flight Plan Data:\n$it")
+        } ?: run {
+            logger.log("Failed to read the flight plan data.")
+        }
+    }
+
     /**
      * Stops drone monitors.
      */
     private fun stopDroneMonitors() {
+        logger.log("Stopping drone monitors.")
         // Close all references linked to the current drone to stop their monitoring.
-
         droneStateRef?.close()
         droneStateRef = null
 
@@ -199,12 +246,16 @@ class MainActivity : AppCompatActivity() {
                 else                   -> "start"
             }
         }
+
+        // Log piloting interface state changes.
+        logger.log("Piloting interface state changed: ${itf?.state}")
     }
 
     /**
      * Called on upload button click.
      */
     private fun onUploadClick() {
+        logger.log("Upload button clicked.")
         val pilotingItf = pilotingItfRef?.get() ?: return
         // Install the flight plan file somewhere on the device FS.
         // NOTE: this is done so to keep things simple for the example, but this should not be done
@@ -219,12 +270,14 @@ class MainActivity : AppCompatActivity() {
         }.getOrNull() ?: return
 
         pilotingItf.uploadFlightPlan(flightPlanFile)
+        logger.log("Flight plan uploaded.")
     }
 
     /**
      * Called on activate button click.
      */
     private fun onActivateClick() {
+        logger.log("Activate button clicked.")
         val pilotingItf = pilotingItfRef?.get() ?: return
 
         when (pilotingItf.state) {
@@ -232,12 +285,15 @@ class MainActivity : AppCompatActivity() {
             Activable.State.IDLE   -> pilotingItf.activate(true)
             else -> {}
         }
+
+        logger.log("Piloting interface activated/stopped.")
     }
 
     /**
      * Starts remote control monitors.
      */
     private fun startRcMonitors() {
+        logger.log("Starting remote control monitors.")
         // Monitor current RC state.
         rcStateRef = rc?.getState { rcState ->
             // Called at each remote state update.
@@ -245,6 +301,9 @@ class MainActivity : AppCompatActivity() {
 
             // Update remote connection state view.
             rcStateTxt.text = rcState.connectionState.toString()
+
+            // Log the connection state change.
+            logger.log("Remote control connection state changed: ${rcState.connectionState}")
         }
     }
 
@@ -252,6 +311,7 @@ class MainActivity : AppCompatActivity() {
      * Stops remote control monitors.
      */
     private fun stopRcMonitors() {
+        logger.log("Stopping remote control monitors.")
         // Close all references linked to the current remote to stop their monitoring.
         rcStateRef?.close()
         rcStateRef = null
