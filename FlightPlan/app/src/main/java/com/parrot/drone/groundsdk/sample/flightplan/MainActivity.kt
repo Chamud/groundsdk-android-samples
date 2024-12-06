@@ -20,6 +20,9 @@ import android.content.Context
 import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class Logger(private val context: Context) {
 
@@ -230,48 +233,71 @@ class MainActivity : AppCompatActivity() {
      * @param itf the piloting interface
      */
     private fun managePilotingItfState(itf: FlightPlanPilotingItf?) {
+        // Log upload state
         uploadStateTxt.text = itf?.latestUploadState?.toString() ?: "N/A"
+        logger.log("Upload state set to: ${uploadStateTxt.text}")
 
+        // Log unavailability reasons
         unavailabilityReasonsTxt.text = itf?.unavailabilityReasons?.joinToString(separator = "\n")
+        logger.log("Unavailability reasons: ${unavailabilityReasonsTxt.text}")
 
+        // Log upload button state
         uploadBtn.isEnabled =
             itf?.latestUploadState !in setOf(null, FlightPlanPilotingItf.UploadState.UPLOADING)
+        logger.log("Upload button isEnabled set to: ${uploadBtn.isEnabled}")
 
+        // Determine and log piloting interface state
         val state = itf?.state ?: Activable.State.UNAVAILABLE
+        logger.log("Piloting interface state is: $state")
 
+        // Configure and log activate button state
         activateBtn.apply {
             isEnabled = state != Activable.State.UNAVAILABLE
             text = when (state) {
                 Activable.State.ACTIVE -> "stop"
                 else                   -> "start"
             }
+            logger.log("Activate button isEnabled set to: $isEnabled")
+            logger.log("Activate button text set to: $text")
         }
 
-        // Log piloting interface state changes.
+        // Log piloting interface state changes
         logger.log("Piloting interface state changed: ${itf?.state}")
     }
 
-    /**
-     * Called on upload button click.
-     */
     private fun onUploadClick() {
         logger.log("Upload button clicked.")
         val pilotingItf = pilotingItfRef?.get() ?: return
-        // Install the flight plan file somewhere on the device FS.
-        // NOTE: this is done so to keep things simple for the example, but this should not be done
-        //       this way. Asset -> FS copy should be offloaded to an I/O thread in order not to
-        //       block the main thread.
-        val flightPlanFile = runCatching {
-            assets.open("flightplan.mavlink").use { input ->
-                File.createTempFile("flightplan", ".mavlink", cacheDir).also {
-                    it.outputStream().use { output -> input.copyTo(output) }
-                }
-            }
-        }.getOrNull() ?: return
 
-        pilotingItf.uploadFlightPlan(flightPlanFile)
-        logger.log("Flight plan uploaded.")
+        // Launch the file operation on an I/O thread
+        CoroutineScope(Dispatchers.IO).launch {
+            val flightPlanFile = runCatching {
+                assets.open("flightplan.mavlink").use { input ->
+                    File.createTempFile("flightplan", ".mavlink", cacheDir).also {
+                        it.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+            }.getOrNull()
+
+            if (flightPlanFile != null) {
+                logger.log("Flight plan file created: $flightPlanFile")
+
+                // Ensure UI updates or piloting interface interactions happen on the main thread
+                CoroutineScope(Dispatchers.Main).launch {
+                    pilotingItf.uploadFlightPlan(flightPlanFile)
+                    val reasons = pilotingItf.unavailabilityReasons
+                    if (reasons != null) {
+                        logger.log("Unavailability reasons: ${reasons.joinToString()}")
+                    } else {
+                        logger.log("No unavailability reasons found.")
+                    }
+                }
+            } else {
+                logger.log("Failed to create flight plan file.")
+            }
+        }
     }
+
 
     /**
      * Called on activate button click.
